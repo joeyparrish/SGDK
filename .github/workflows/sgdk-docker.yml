@@ -19,28 +19,35 @@ on:
       - 'sample/**'
       - '**.md'
 
-env:
-  # TODO: arm64 images are currently disabled because they keep hanging in the
-  # GitHub Actions environment.
-  #PLATFORMS: linux/amd64,linux/arm64
-  PLATFORMS: linux/amd64
-
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build images
 
     permissions:
       packages: write
       contents: read
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-latest
+            arch: arm64
+
+    runs-on: ${{ matrix.os }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # TODO: arm64 images are currently disabled because they keep hanging in
-      # the GitHub Actions environment.
-      #- name: Set up QEMU
-      #  uses: docker/setup-qemu-action@v3
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -61,23 +68,32 @@ jobs:
             gcc:
               - deps/gcc.Dockerfile
 
-      - name: Build m68k GCC (only if changed)
+      - name: Build and push m68k GCC by digest (only if changed)
+        id: build-gcc
         if: steps.changed-files.outputs.gcc_any_changed == 'true'
         uses: docker/build-push-action@v5
         with:
           file: deps/gcc.Dockerfile
           context: deps/
-          platforms: ${{ env.PLATFORMS }}
-          tags: ghcr.io/${{ github.actor }}/sgdk-m68k-gcc:latest
-          push: false
-          load: true
+          platforms: linux/${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/${{ github.actor }}/sgdk-m68k-gcc,push-by-digest=true,name-canonical=true,push=${{ github.event_name == 'push' }}
 
-      # Push is a separate step so the build logs are clearly separate from the
-      # push logs.
-      - name: Push m68k GCC (only if changed, only on push event)
+      - name: Export GCC digest
         if: steps.changed-files.outputs.gcc_any_changed == 'true' && github.event_name == 'push'
         run: |
-          docker image push ghcr.io/${{ github.actor }}/sgdk-m68k-gcc:latest
+          mkdir -p /tmp/digests
+          digest="${{ steps.build-gcc.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload GCC digest
+        if: steps.changed-files.outputs.gcc_any_changed == 'true' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-gcc-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
       # NOTE: If you are seeing failures in this job right after forking SGDK,
       # you may need to bootstrap the base image into your fork on ghcr.io.
@@ -87,21 +103,126 @@ jobs:
       #                    ghcr.io/YOUR_NAMEE/sgdk-m68k-gcc:latest
       #   gh auth token | docker login ghcr.io -u YOUR_NAME --password-stdin
       #   docker image push ghcr.io/YOUR_NAMEE/sgdk-m68k-gcc:latest
-      - name: Build SGDK
+      - name: Build and push SGDK by digest
+        id: build-sgdk
         uses: docker/build-push-action@v5
         with:
           file: Dockerfile
           context: .
-          platforms: ${{ env.PLATFORMS }}
+          platforms: linux/${{ matrix.arch }}
           build-args: |
             BASE_IMAGE=ghcr.io/${{ github.actor }}/sgdk-m68k-gcc
-          tags: ghcr.io/${{ github.actor }}/sgdk:latest
-          push: false
-          load: true
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/${{ github.actor }}/sgdk,push-by-digest=true,name-canonical=true,push=${{ github.event_name == 'push' }}
 
-      # Push is a separate step so the build logs are clearly separate from the
-      # push logs.
-      - name: Push SGDK (only on push event)
+      - name: Export SGDK digest
         if: github.event_name == 'push'
         run: |
-          docker image push ghcr.io/${{ github.actor }}/sgdk:latest
+          mkdir -p /tmp/digests
+          digest="${{ steps.build-sgdk.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload SGDK digest
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-sgdk-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-gcc:
+    name: Merge GCC images
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs:
+      - build
+
+    steps:
+      - name: Check if GCC Dockerfile has changed
+        id: changed-files
+        uses: tj-actions/changed-files@v42
+        with:
+          files_yaml: |
+            gcc:
+              - deps/gcc.Dockerfile
+
+      - name: Download digests
+        if: steps.changed-files.outputs.gcc_any_changed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-gcc-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        if: steps.changed-files.outputs.gcc_any_changed == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        if: steps.changed-files.outputs.gcc_any_changed == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+
+      - name: Login to GHCR
+        if: steps.changed-files.outputs.gcc_any_changed == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        if: steps.changed-files.outputs.gcc_any_changed == 'true'
+        working-directory: /tmp/digests
+        run: |
+          set -x
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.actor }}/sgdk-m68k-gcc@sha256:%s ' *)
+
+      - name: Inspect image
+        if: steps.changed-files.outputs.gcc_any_changed == 'true'
+        run: |
+          set -x
+          docker buildx imagetools inspect ghcr.io/${{ github.actor }}/sgdk-m68k-gcc:${{ steps.meta.outputs.version }}
+
+  merge-sgdk:
+    name: Merge SGDK images
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs:
+      - build
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-sgdk-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          set -x
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.actor }}/sgdk@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          set -x
+          docker buildx imagetools inspect ghcr.io/${{ github.actor }}/sgdk:${{ steps.meta.outputs.version }}
