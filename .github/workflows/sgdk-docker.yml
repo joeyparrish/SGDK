@@ -93,7 +93,7 @@ jobs:
           push: false
           load: true
           # Cache the built image where the SGDK image can reference it later.
-          cache-to: type=local,src=${{ runner.workspace }}/build-cache
+          cache-to: type=local,dest=${{ runner.workspace }}/build-cache
 
       # Push is a separate step so the build logs are clearly separate from the
       # push logs.
