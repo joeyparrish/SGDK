@@ -88,6 +88,8 @@ jobs:
           tags: ghcr.io/${{ env.GHCR_ORG }}/sgdk-m68k-gcc:latest
           push: false
           load: true
+          # Cache the built image where the SGDK image can reference it later.
+          cache-to: type=local,src=${{ github.workspace }}/build-cache
 
       # Push is a separate step so the build logs are clearly separate from the
       # push logs.
@@ -98,7 +100,7 @@ jobs:
 
       # Right after forking SGDK, the fork will not have a GCC image.
       # We may need to fetch the latest from upstream before building SGDK.
-      - name: Bootstrap m68k GCC
+      - name: Bootstrap m68k GCC (only if not changed)
         if: steps.changed-files.outputs.gcc_any_changed == 'false'
         run: |
           # Pull from the user's fork, fall back to the upstream repo.
@@ -122,6 +124,9 @@ jobs:
           tags: ghcr.io/${{ env.GHCR_ORG }}/sgdk:latest
           push: false
           load: true
+          # When we build m68k GCC without pushing it, the build cache is how
+          # this step is able to grab the same image from that earlier step.
+          cache-from: type=local,src=${{ github.workspace }}/build-cache
 
       # Push is a separate step so the build logs are clearly separate from the
       # push logs.
