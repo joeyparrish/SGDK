@@ -52,10 +52,6 @@ jobs:
           # locally for the next step.
           driver: docker
 
-      - name: Create build cache directory
-        run: |
-          mkdir -p "${{ runner.workspace }}/build-cache"
-
       - name: Login to GHCR (only on push event)
         if: github.event_name == 'push'
         uses: docker/login-action@v3
@@ -96,8 +92,6 @@ jobs:
           tags: ghcr.io/${{ env.GHCR_ORG }}/sgdk-m68k-gcc:latest
           push: false
           load: true
-          # Cache the built image where the SGDK image can reference it later.
-          cache-to: type=local,dest=${{ runner.workspace }}/build-cache
 
       # Push is a separate step so the build logs are clearly separate from the
       # push logs.
@@ -132,9 +126,6 @@ jobs:
           tags: ghcr.io/${{ env.GHCR_ORG }}/sgdk:latest
           push: false
           load: true
-          # When we build m68k GCC without pushing it, the build cache is how
-          # this step is able to grab the same image from that earlier step.
-          cache-from: type=local,src=${{ runner.workspace }}/build-cache
 
       # Push is a separate step so the build logs are clearly separate from the
       # push logs.
